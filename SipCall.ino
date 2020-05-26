@@ -8,6 +8,7 @@
 #include "mbedtls/md.h"
 #include "mbedtls/base64.h"
 #include <Ticker.h>
+#include "time.h"
 #include "SIP.h"
 
 #define login() if(!checkUser()){return server.requestAuthentication(BASIC_AUTH, "door", "login failed");}
@@ -18,6 +19,11 @@ const char* ssid = "door";
 const char* password = "eurxdqi!it>yiuj";
 const char* bootUser = "admin";
 const char* bootPassword = "fe590f7d2a79441576969a187e62054b62ca0ee6728e9fe0c3581c089bb4c977";
+const char* ntpServer = "europe.pool.ntp.org";
+const long  gmtOffset_sec = 3600;
+const int   daylightOffset_sec = 3600;
+int doNotDistBeginHour=-1;
+int doNotDistEndHour=25;
 
 struct Button {
   const uint8_t PIN;
@@ -32,6 +38,7 @@ Button ring{18,0,0,0,0};
 WebServer server(80);
 SIP sipRinger;
 Ticker closeTheValve;
+
 
 /*
  * Login page
@@ -199,10 +206,69 @@ const char* sipSettings =
     "</table>"
 "</form>";
 
+const char* ntpSettings = 
+ "<form name='loginForm' action='/ntpSettings' method='post'>"
+    "<table width='20%' bgcolor='A09F9F' align='center'>"
+        "<tr>"
+            "<td colspan=2>"
+                "<center><font size=4><b>ntpSettings</b></font></center>"
+                "<br>"
+            "</td>"
+            "<br>"
+            "<br>"
+        "</tr>"
+        "<tr>"
+        "<td>ntpServer:</td>"
+        "<td><input type='text' size=25 name='ntpServer'><br></td>"
+        "</tr>"
+        "<tr>"
+        "<tr>"
+        "<td>gmtOffeset</td>"
+        "<td><input type='text' size=25 name='gmtOffset'><br></td>"
+        "</tr>"
+        "<td>daylightOffset:</td>"
+        "<td><input type='text' size=25 name='daylightOffset'><br></td>"
+        "</tr>"
+        "<td>doNotDistBeginHour:</td>"
+        "<td><input type='text' size=25 name='doNotDistBeginHour'><br></td>"
+        "</tr>"
+        "<td>doNotDistEndHour:</td>"
+        "<td><input type='text' size=25 name='doNotDistEndHour'><br></td>"
+        "</tr>"
+        "<br>"
+        "<br>"
+        "<tr>"
+            "<td><input type='submit' value='Apply'></td>"
+        "</tr>"
+    "</table>"
+"</form>";
+
 void stopSnapper() {
   digitalWrite(19,LOW);
 }
 
+void setTime(){
+  File file;
+  if(!SPIFFS.exists("/ntp.json")){
+    DynamicJsonDocument doc(512);
+    doc["ntpServer"]=ntpServer;
+    doc["gmtOffset"]=gmtOffset_sec;
+    doc["daylightOffset"]=daylightOffset_sec;
+    doc["doNotDistBeginHour"]=doNotDistBeginHour;
+    doc["doNotDistEndHour"]=doNotDistEndHour;
+    file = SPIFFS.open("/ntp.json", FILE_WRITE);
+    serializeJson(doc, file);
+    file.close();
+  }
+  file = SPIFFS.open("/ntp.json", FILE_READ);
+  StaticJsonDocument<512> doc;
+  deserializeJson(doc, file);
+  file.close();
+  JsonObject parsed =  doc.as<JsonObject>();
+  configTime(parsed["gmtOffset"], parsed["daylightOffset"], parsed["ntpServer"]);
+  doNotDistBeginHour=doc["doNotDistBeginHour"];
+  doNotDistEndHour=doc["doNotDistBeginHour"];
+}
 
 char* createSHA(char *str){
   byte res[32];
@@ -301,18 +367,27 @@ bool connectWlan(){
   deserializeJson(doc, file);
   file.close();
   JsonObject parsed =  doc.as<JsonObject>();
+  for(int j=0;j<2;j++){
   WiFi.begin((const char*)(parsed["ssid"]),(const char*)(parsed["password"]));
   WiFi.setHostname(parsed["host"]);
   
   // Wait for connection
   int i=0;
-  while (WiFi.status() != WL_CONNECTED && i<25 ) {
+  while (WiFi.status() != WL_CONNECTED && i<15 ) {
         delay(1000);
         i++;
   }
   if(WiFi.status() != WL_CONNECTED){
+    WiFi.disconnect(true);
+    continue;
+  }else{
+    break;
+  }
+  }
+  if(WiFi.status() != WL_CONNECTED){
     return 1;
   }
+  setTime();
   
 
    /*use mdns for host name resolution*/
@@ -354,19 +429,21 @@ bool connectWlan(){
 
 void IRAM_ATTR ringHigh() {
   unsigned long mil=millis();
-  if(mil-ring.PressesTime>250){
-    ring.PressesTime=mil;
-    ring.numberKeyPresses=0;
-  }else if(ring.numberKeyPresses>=14){
-    ring.numberKeyPresses=0;
-    ring.PressesTime=mil;
-    sipRinger.ring();
+  if(mil-ring.PressesTime>500){
+     ring.PressesTime=mil;
+     ring.numberKeyPresses=1;
+  }else if(ring.numberKeyPresses>=24){
+    struct tm timeinfo;
+    if(getLocalTime(&timeinfo)){
+      if(timeinfo.tm_hour<doNotDistBeginHour && timeinfo.tm_hour>=doNotDistEndHour){
+        sipRinger.ring();
+      }
+    }else{
+      sipRinger.ring();
+    }
+     ring.numberKeyPresses=1;
   }else{
     ring.numberKeyPresses++;
-    ring.resetCount++;
-    if(ring.max<ring.numberKeyPresses){
-      ring.max=ring.numberKeyPresses;
-    }
   }
 }
 
@@ -411,6 +488,18 @@ void setup(void) {
   server.on("/", HTTP_GET, []() {
     server.sendHeader("Connection", "close");
     server.send(200, "text/html", loginIndex);
+  });
+    server.on("/getTime", HTTP_GET, []() {
+    login();
+    server.sendHeader("Connection", "close");
+    struct tm timeinfo;
+    if(!getLocalTime(&timeinfo)){
+      server.send(200, "text/html", "Failed to obtain time");
+    }else{
+      char timeStr[35];
+      strftime(timeStr, 34, "%A, %B %d %Y %H:%M:%S",&timeinfo);
+      server.send(200, "text/html", timeStr);
+    }
   });
   server.on("/serverIndex", HTTP_GET, []() {
     login();
@@ -493,6 +582,38 @@ void setup(void) {
     server.send(200, "text/html", "not all parameter");
 
   });
+    server.on("/ntpSettings", HTTP_GET, []() {
+    login();
+    server.sendHeader("Connection", "close");
+    server.send(200, "text/html", ntpSettings);
+  });
+  server.on("/ntpSettings", HTTP_POST, []() {
+    login();
+    if (server.hasArg("ntpServer")&&server.hasArg("gmtOffset")&&server.hasArg("daylightOffset")&&server.hasArg("doNotDistEndHour")&&server.hasArg("doNotDistBeginHour")) {
+    File file;
+    DynamicJsonDocument doc(512);
+    int gmt;
+    sscanf(server.arg("gmtOffset").c_str(),"%d",&gmt);
+    doc["gmtOffset"]=gmt;
+    sscanf(server.arg("daylightOffset").c_str(),"%d",&gmt);
+    doc["daylightOffset"]=gmt;
+    doc["ntpServer"]=server.arg("ntpServer");
+    sscanf(server.arg("doNotDistBeginHour").c_str(),"%d",&gmt);
+    doc["doNotDistEndHour"]=gmt;
+    sscanf(server.arg("doNotDistEndHour").c_str(),"%d",&gmt);
+    doc["doNotDistEndHour"]=gmt;
+    file = SPIFFS.open("/ntp.json", FILE_WRITE);
+    serializeJson(doc, file);
+    file.close();
+    server.sendHeader("Connection", "close");
+    server.send(200, "text/html", ntpSettings);
+    delay(500);
+    ESP.restart();
+    }
+    server.sendHeader("Connection", "close");
+    server.send(200, "text/html", "not all parameter");
+
+  });
   /*handling uploading firmware file */
   server.on("/update", HTTP_POST, []() {
     login();
@@ -520,9 +641,9 @@ void setup(void) {
     }
   });
   server.begin();
-  pinMode(18, INPUT_PULLUP);
+  pinMode(18, INPUT_PULLDOWN);
   pinMode(19, OUTPUT);
-  attachInterrupt(18, ringHigh, FALLING);
+  attachInterrupt(18, ringHigh, RISING);
 }
 
 void loop(void) {
