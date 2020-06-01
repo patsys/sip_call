@@ -30,10 +30,11 @@ struct Button {
   uint32_t numberKeyPresses;
   unsigned long PressesTime;
   int max;
+  bool trigger;
   int resetCount;
 };
 
-Button ring{18,0,0,0,0};
+Button ring{18,0,0,0,0,false};
 
 WebServer server(80);
 SIP sipRinger;
@@ -267,7 +268,7 @@ void setTime(){
   JsonObject parsed =  doc.as<JsonObject>();
   configTime(parsed["gmtOffset"], parsed["daylightOffset"], parsed["ntpServer"]);
   doNotDistBeginHour=doc["doNotDistBeginHour"];
-  doNotDistEndHour=doc["doNotDistBeginHour"];
+  doNotDistEndHour=doc["doNotDistEndHour"];
 }
 
 char* createSHA(char *str){
@@ -415,7 +416,6 @@ bool connectWlan(){
         printf("MDNS Init failed: %d\n", err);
         return 0;
     }
-
     //set hostname
     mdns_hostname_set((const char*)(parsed["host"]));
     //set default instance
@@ -428,9 +428,17 @@ bool connectWlan(){
 
 
 void IRAM_ATTR ringHigh() {
-  unsigned long mil=millis();
-  if(mil-ring.PressesTime>500){
+  int i;
+  for(i=0;i<5&&digitalRead(18);i++){
+    delay(6);
+  }
+  ring.resetCount=i;
+  if(i==5){
+    sipRinger.ring();
+  }
+/*  if(mil-ring.PressesTime>500){
      ring.PressesTime=mil;
+     ring.resetCount=ring.numberKeyPresses;
      ring.numberKeyPresses=1;
   }else if(ring.numberKeyPresses>=24){
     struct tm timeinfo;
@@ -445,6 +453,7 @@ void IRAM_ATTR ringHigh() {
   }else{
     ring.numberKeyPresses++;
   }
+*/
 }
 
 /*
@@ -500,6 +509,13 @@ void setup(void) {
       strftime(timeStr, 34, "%A, %B %d %Y %H:%M:%S",&timeinfo);
       server.send(200, "text/html", timeStr);
     }
+  });
+  server.on("/getTmp", HTTP_GET, []() {
+    login();
+    server.sendHeader("Connection", "close");
+    char timeStr[10];
+    sprintf(timeStr, "%d %d",doNotDistBeginHour,doNotDistEndHour);
+    server.send(200, "text/html", timeStr);
   });
   server.on("/serverIndex", HTTP_GET, []() {
     login();
@@ -599,7 +615,7 @@ void setup(void) {
     doc["daylightOffset"]=gmt;
     doc["ntpServer"]=server.arg("ntpServer");
     sscanf(server.arg("doNotDistBeginHour").c_str(),"%d",&gmt);
-    doc["doNotDistEndHour"]=gmt;
+    doc["doNotDistBeginHour"]=gmt;
     sscanf(server.arg("doNotDistEndHour").c_str(),"%d",&gmt);
     doc["doNotDistEndHour"]=gmt;
     file = SPIFFS.open("/ntp.json", FILE_WRITE);
@@ -643,10 +659,18 @@ void setup(void) {
   server.begin();
   pinMode(18, INPUT_PULLDOWN);
   pinMode(19, OUTPUT);
-  attachInterrupt(18, ringHigh, RISING);
+//  attachInterrupt(18, ringHigh, RISING);
 }
 
 void loop(void) {
+  int i;
+  for(i=0;i<20&&digitalRead(18);i++){
+    delay(6);
+    ring.resetCount=i;
+  }
+  if(i==20){
+    sipRinger.ring();
+  }
   server.handleClient();
   delay(1);
   sipRinger.update();
